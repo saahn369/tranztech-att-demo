@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Attendance</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+
+  <style>
+    body { font-family: sans-serif; background-color: #f3f4f6; }
+    .hidden { display: none; }
+    #reader { width: 100%; border-radius: 10px; overflow: hidden; }
+  </style>
+</head>
+<body class="flex flex-col items-center justify-center min-h-screen p-4">
+
+  <div id="login-view" class="w-full max-w-sm bg-white p-6 rounded-lg shadow-lg">
+    <h2 class="text-2xl font-bold mb-4 text-center">Office Login</h2>
+    <input type="email" id="email" placeholder="Email" class="w-full p-3 mb-3 border rounded">
+    <input type="password" id="pass" placeholder="Password" class="w-full p-3 mb-3 border rounded">
+    <button onclick="handleLogin()" class="w-full bg-blue-600 text-white p-3 rounded font-bold">Login</button>
+    <p id="login-msg" class="text-red-500 mt-2 text-center"></p>
+  </div>
+
+  <div id="admin-view" class="hidden w-full max-w-md bg-white p-6 rounded-lg shadow-lg text-center">
+    <h2 class="text-xl font-bold mb-2">Scan to Mark Attendance</h2>
+    <p class="text-sm text-gray-500 mb-4">Refreshes every 30s</p>
+    <div id="qrcode" class="flex justify-center mb-4"></div> <div id="timer" class="text-2xl font-mono text-blue-600">30</div>
+    <button onclick="logout()" class="mt-4 text-sm text-gray-500 underline">Logout</button>
+  </div>
+
+  <div id="employee-view" class="hidden w-full max-w-md bg-white p-4 rounded-lg shadow-lg text-center">
+    <h2 class="text-lg font-bold mb-2" id="welcome-name"></h2>
+    
+    <div id="status-box" class="mb-4 text-sm p-2 bg-yellow-100 rounded text-yellow-800">
+      Wait... Getting Location & IP...
+    </div>
+
+    <div id="reader"></div>
+    <button onclick="logout()" class="mt-4 text-sm text-gray-500 underline">Logout</button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+  <script>
+    let user = null;
+    let userIP = '';
+    let userLat = 0;
+    let userLng = 0;
+    let html5QrcodeScanner;
+
+    // --- LOGIN LOGIC ---
+    function handleLogin() {
+      const e = document.getElementById('email').value;
+      const p = document.getElementById('pass').value;
+      const btn = document.querySelector('button');
+      btn.innerText = "Checking...";
+      
+      google.script.run.withSuccessHandler(res => {
+        btn.innerText = "Login";
+        if (res.success) {
+          user = res;
+          document.getElementById('login-view').classList.add('hidden');
+          if (res.role === 'ADMIN') {
+            startAdminMode();
+          } else {
+            startEmployeeMode();
+          }
+        } else {
+          document.getElementById('login-msg').innerText = res.message;
+        }
+      }).loginUser(e, p);
+    }
+
+    // --- ADMIN: ROTATING QR ---
+    function startAdminMode() {
+      document.getElementById('admin-view').classList.remove('hidden');
+      refreshQR();
+      setInterval(refreshQR, 30000); // 30 Seconds
+      
+      // Timer Visual
+      let timeLeft = 30;
+      setInterval(() => {
+        timeLeft--;
+        if(timeLeft < 0) timeLeft = 30;
+        document.getElementById('timer').innerText = timeLeft;
+      }, 1000);
+    }
+
+    function refreshQR() {
+      google.script.run.withSuccessHandler(token => {
+        const container = document.getElementById('qrcode');
+        container.innerHTML = ""; // Clear old
+        new QRCode(container, { text: token, width: 200, height: 200 });
+      }).generateToken();
+    }
+
+    // --- EMPLOYEE: SCANNER ---
+    function startEmployeeMode() {
+      document.getElementById('employee-view').classList.remove('hidden');
+      document.getElementById('welcome-name').innerText = "Hi, " + user.name;
+      
+      // 1. Get IP
+      fetch('https://api.ipify.org?format=json')
+        .then(response => response.json())
+        .then(data => {
+          userIP = data.ip;
+          checkReadiness();
+        });
+
+      // 2. Get Location
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(pos => {
+          userLat = pos.coords.latitude;
+          userLng = pos.coords.longitude;
+          checkReadiness();
+        }, err => {
+          alert("Location Access Denied. Cannot mark attendance.");
+        }, { enableHighAccuracy: true });
+      }
+    }
+
+    function checkReadiness() {
+      const box = document.getElementById('status-box');
+      if(userIP && userLat) {
+        box.className = "mb-4 text-sm p-2 bg-green-100 rounded text-green-800";
+        box.innerText = "Ready to Scan! (IP: " + userIP + ")";
+        startScanner();
+      }
+    }
+
+    function startScanner() {
+      html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: 250 });
+      html5QrcodeScanner.render(onScanSuccess);
+    }
+
+    function onScanSuccess(decodedText) {
+      html5QrcodeScanner.clear(); // Stop scanning
+      document.getElementById('status-box').innerText = "Verifying...";
+      
+      const payload = {
+        qrToken: decodedText,
+        userIP: userIP,
+        lat: userLat,
+        lng: userLng,
+        email: user.email,
+        name: user.name
+      };
+
+      google.script.run.withSuccessHandler(res => {
+        alert(res.message);
+        if(res.success) {
+           document.getElementById('status-box').innerText = "Attendance Marked!";
+        } else {
+           location.reload(); // Reload to try again
+        }
+      }).markAttendance(payload);
+    }
+    
+    function logout() { location.reload(); }
+  </script>
+</body>
+</html>
